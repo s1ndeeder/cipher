@@ -191,7 +191,7 @@ $aupStatus = empty($aupViolations) ? 'OK' : 'NOT OK (' . implode(', ', $aupViola
 // =====================================================
 // SUMMARY (clipboard text)
 // =====================================================
-$summary = "Evaluated by: Cipher WP Runner v" . CIPHER_VERSION . "\n";
+$summary = "Evaluated by: \n";
 $summary .= "Site: " . get_site_url() . "\n";
 $summary .= "Disk Usage: " . fmt_bytes($totalSize) . "\n";
 $summary .= "Inodes: " . number_format($inodes) . "\n";
