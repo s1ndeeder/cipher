@@ -1,0 +1,22 @@
+# WP Migration backups (large binary files)
+*.wpress
+*.zip
+storage/
+backups/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+debug.log
+
+# Working directory
+/tmp/
