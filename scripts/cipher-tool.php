@@ -399,7 +399,10 @@ table td{padding:8px;border-bottom:1px solid #333;}
             <td><a href="<?= htmlspecialchars($b['url']) ?>" download>📁 <?= htmlspecialchars($b['name']) ?></a></td>
             <td style="color:#999;"><?= fmt_bytes($b['size']) ?></td>
             <td style="color:#999;"><?= date('Y-m-d H:i', $b['mtime']) ?></td>
-            <td><a href="<?= htmlspecialchars($b['url']) ?>" download class="btn">⬇</a></td>
+            <td>
+                <a href="<?= htmlspecialchars($b['url']) ?>" download class="btn" title="Download">⬇</a>
+                <button onclick="copyToClipboard('<?= htmlspecialchars($b['url']) ?>', this)" class="btn btn-copy">📋 Copy Link</button>
+            </td>
         </tr>
     <?php endforeach; ?>
     </table>
@@ -413,15 +416,24 @@ table td{padding:8px;border-bottom:1px solid #333;}
 </div>
 
 <script>
-function copySummary() {
-    const text = <?= json_encode($summary) ?>;
+// Універсальна функція для копіювання
+function copyToClipboard(text, btn) {
     navigator.clipboard.writeText(text).then(() => {
-        const btn = event.target;
         const orig = btn.textContent;
-        btn.textContent = '✓ Copied!';
+        btn.textContent = '✅ Done!';
         btn.style.background = '#0e7c4a';
-        setTimeout(() => { btn.textContent = orig; btn.style.background = ''; }, 2000);
+        setTimeout(() => { 
+            btn.textContent = orig; 
+            btn.style.background = ''; 
+        }, 2000);
+    }).catch(err => {
+        console.error('Failed to copy: ', err);
     });
+}
+
+function copySummary(event) {
+    const text = <?= json_encode($summary) ?>;
+    copyToClipboard(text, event.target);
 }
 </script>
 </body>
