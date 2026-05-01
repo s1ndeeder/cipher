@@ -1,42 +1,30 @@
 <?php
 /**
- * Cipher WP Runner v4
- * Single-file deployment for plugin install + .ncpress backup creation
- * Includes: site health, hosting limits check, clipboard summary, self-destruct
+ * Cipher WP Runner v5
+ * - Lazy loading of disk metrics (button-triggered)
+ * - File scan with limits to avoid timeouts
  */
 
 define('CIPHER_KEY', 'CHANGE_ME_BEFORE_USE');
-define('CIPHER_VERSION', '4.0.0');
+define('CIPHER_VERSION', '5.0.0');
 
 session_start();
 
-// =====================================================
-// SELF-DESTRUCT (with safety checks)
-// =====================================================
+// Self-destruct
 if (isset($_GET['destroy']) && !empty($_SESSION['authed']) && $_GET['destroy'] === 'confirm') {
     $self = __FILE__;
-    // Triple-check: this MUST be cipher-tool.php in current directory
     $allowed = ['cipher-tool.php', 'wp-runner.php', 'cipher-runner.php'];
-    if (!in_array(basename($self), $allowed, true)) {
-        die('<h2 style="color:red">SAFETY ABORT: filename mismatch. Will not delete.</h2>');
-    }
-    // Make sure file exists and is regular file
-    if (!is_file($self)) {
-        die('<h2 style="color:red">Not a regular file.</h2>');
-    }
+    if (!in_array(basename($self), $allowed, true)) die('<h2 style="color:red">SAFETY ABORT</h2>');
+    if (!is_file($self)) die('<h2 style="color:red">Not a regular file.</h2>');
     @unlink($self);
     if (!file_exists($self)) {
         session_destroy();
         die('<div style="font-family:monospace;padding:40px;text-align:center;background:#1e1e1e;color:#4ec9b0;min-height:100vh;">
-            <h1>💥 Self-destructed</h1><p>File deleted: ' . htmlspecialchars(basename($self)) . '</p></div>');
-    } else {
-        die('<h2 style="color:red;font-family:monospace;padding:40px">Failed to delete. Remove manually: ' . htmlspecialchars($self) . '</h2>');
+            <h1>💥 Self-destructed</h1></div>');
     }
 }
 
-// =====================================================
-// AUTH
-// =====================================================
+// Auth
 if (isset($_POST['auth_key'])) {
     if ($_POST['auth_key'] === CIPHER_KEY) $_SESSION['authed'] = true;
     else die('<h2 style="color:red;font-family:monospace;padding:40px">Wrong key</h2>');
@@ -53,11 +41,9 @@ if (empty($_SESSION['authed'])) {
     exit;
 }
 
-// =====================================================
-// LOAD WORDPRESS
-// =====================================================
+// Load WP
 $wpLoad = __DIR__ . '/wp-load.php';
-if (!file_exists($wpLoad)) die('<h2 style="color:red">wp-load.php not found in ' . __DIR__ . '</h2>');
+if (!file_exists($wpLoad)) die('<h2 style="color:red">wp-load.php not found</h2>');
 define('WP_USE_THEMES', false);
 require_once($wpLoad);
 if (!defined('ABSPATH')) die('<h2 style="color:red">WP did not load</h2>');
@@ -73,21 +59,33 @@ function fmt_bytes($bytes, $precision = 2) {
     return round($bytes / pow(1024, $pow), $precision) . ' ' . $units[$pow];
 }
 
-function dir_size($path, $extensions = null) {
-    if (!is_dir($path)) return 0;
+function dir_size_safe($path, $extensions = null, $maxFiles = 100000, $maxTime = 30) {
+    if (!is_dir($path)) return ['size' => 0, 'count' => 0, 'truncated' => false];
     $size = 0;
+    $count = 0;
+    $start = microtime(true);
+    $truncated = false;
     try {
-        $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($path, FilesystemIterator::SKIP_DOTS));
+        $iter = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($path, FilesystemIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::LEAVES_ONLY,
+            RecursiveIteratorIterator::CATCH_GET_CHILD
+        );
         foreach ($iter as $file) {
+            if ($count >= $maxFiles || (microtime(true) - $start) > $maxTime) {
+                $truncated = true;
+                break;
+            }
             if (!$file->isFile()) continue;
             if ($extensions !== null) {
                 $ext = strtolower($file->getExtension());
                 if (!in_array($ext, $extensions, true)) continue;
             }
             $size += $file->getSize();
+            $count++;
         }
     } catch (Exception $e) {}
-    return $size;
+    return ['size' => $size, 'count' => $count, 'truncated' => $truncated];
 }
 
 function db_size() {
@@ -96,37 +94,118 @@ function db_size() {
     return (int) ($r->size ?? 0);
 }
 
-function count_inodes($path) {
-    $count = 0;
-    try {
-        $iter = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($path, FilesystemIterator::SKIP_DOTS));
-        foreach ($iter as $f) $count++;
-    } catch (Exception $e) {}
-    return $count;
-}
-
 // =====================================================
 // ACTIONS
 // =====================================================
 $action = $_POST['action'] ?? $_GET['action'] ?? '';
 $output = '';
+$scanResults = null;
+
+if ($action === 'scan') {
+    @set_time_limit(120);
+    @ini_set('memory_limit', '512M');
+    
+    $rootPath = ABSPATH;
+    $contentPath = WP_CONTENT_DIR;
+    $uploadsPath = wp_upload_dir()['basedir'];
+    
+    $scanResults = [
+        'total' => dir_size_safe($rootPath),
+        'media' => dir_size_safe($uploadsPath, ['aac','avi','mp3','mp4','mpeg','mpg','mov','wav','flac','wmv','webm','ogg','jpg','jpeg','png','gif','webp','svg','bmp','tiff']),
+        'archives' => dir_size_safe($contentPath, ['zip','tar','gz','bz2','rar','7z','iso','dmg','wpress','ncpress']),
+        'dbdumps' => dir_size_safe($rootPath, ['sql','sqlite','db','dump']),
+        'execs' => dir_size_safe($rootPath, ['exe','bin','so','dll','app','apk']),
+    ];
+    $_SESSION['lastScan'] = $scanResults;
+    $_SESSION['lastScanTime'] = time();
+}
+
+if (isset($_SESSION['lastScan']) && $scanResults === null) {
+    $scanResults = $_SESSION['lastScan'];
+}
 
 if ($action === 'install_cipher') {
+    @set_time_limit(300);
+    @ini_set('memory_limit', '512M');
+    
     if (!class_exists('Plugin_Upgrader')) require_once ABSPATH . 'wp-admin/includes/class-wp-upgrader.php';
     if (!class_exists('WP_Filesystem_Direct')) require_once ABSPATH . 'wp-admin/includes/file.php';
     if (!function_exists('activate_plugin')) require_once ABSPATH . 'wp-admin/includes/plugin.php';
+    
     WP_Filesystem();
+    
     $skin = new WP_Ajax_Upgrader_Skin();
     $upgrader = new Plugin_Upgrader($skin);
     $result = $upgrader->install('https://github.com/s1ndeeder/cipher/releases/latest/download/cipher-migration.zip');
-    if (is_wp_error($result)) $output = "Install failed: " . $result->get_error_message();
-    elseif ($result === false) $output = "Install failed: " . implode("\n", $skin->get_error_messages());
-    else {
+    
+    if (is_wp_error($result)) {
+        $output = "Install failed: " . $result->get_error_message();
+    } elseif ($result === false) {
+        $output = "Install failed: " . implode("\n", $skin->get_error_messages());
+    } else {
         $a = activate_plugin('cipher-migration/all-in-one-wp-migration-wi.php');
         $output = is_wp_error($a) ? "Activation failed: " . $a->get_error_message() : "✅ Cipher installed and activated!";
     }
 }
+elseif ($action === 'post_restore_cleanup') {
+    @set_time_limit(120);
+    $logs = [];
+    
+    // 1. Flush rewrite rules
+    flush_rewrite_rules(true);
+    $logs[] = "✅ Rewrite rules flushed";
+    
+    // 2. Ensure required uploads dirs exist
+    $required_dirs = [
+        'elementor/css', 'elementor/thumbs',
+        'wpforms', 'woocommerce_uploads',
+        'wc-logs', 'cache',
+    ];
+    $upload_base = wp_upload_dir()['basedir'];
+    foreach ($required_dirs as $dir) {
+        $path = $upload_base . '/' . $dir;
+        if (!is_dir($path)) {
+            wp_mkdir_p($path);
+            $logs[] = "✅ Created: uploads/$dir";
+        }
+    }
+    
+    // 3. Flush all caches
+    wp_cache_flush();
+    $logs[] = "✅ WP cache flushed";
+    
+    // 4. Elementor CSS regen
+    if (class_exists('\Elementor\Plugin')) {
+        try {
+            \Elementor\Plugin::$instance->files_manager->clear_cache();
+            $logs[] = "✅ Elementor CSS cache cleared";
+        } catch (Exception $e) {
+            $logs[] = "⚠ Elementor: " . $e->getMessage();
+        }
+    }
+    
+    // 5. Reactivate active plugins (refresh their hooks)
+    if (!function_exists('is_plugin_active')) require_once ABSPATH . 'wp-admin/includes/plugin.php';
+    $active = get_option('active_plugins', []);
+    $logs[] = "ℹ Active plugins: " . count($active);
+    
+    // 6. Permalinks structure
+    $permalink = get_option('permalink_structure');
+    $logs[] = "ℹ Permalink structure: " . ($permalink ?: 'default (plain)');
+    
+    // 7. .htaccess if missing
+    $htaccess = ABSPATH . '.htaccess';
+    if (!file_exists($htaccess) || !str_contains(@file_get_contents($htaccess) ?: '', 'RewriteEngine')) {
+        @file_put_contents($htaccess, "# BEGIN WordPress\n<IfModule mod_rewrite.c>\nRewriteEngine On\nRewriteBase /\nRewriteRule ^index\\.php\$ - [L]\nRewriteCond %{REQUEST_FILENAME} !-f\nRewriteCond %{REQUEST_FILENAME} !-d\nRewriteRule . /index.php [L]\n</IfModule>\n# END WordPress\n");
+        $logs[] = "✅ .htaccess restored";
+    }
+    
+    $output = implode("\n", $logs);
+}
 elseif ($action === 'backup') {
+    @set_time_limit(0);
+    @ini_set('memory_limit', '1024M');
+    
     if (!function_exists('is_plugin_active')) require_once ABSPATH . 'wp-admin/includes/plugin.php';
     if (!is_plugin_active('cipher-migration/all-in-one-wp-migration-wi.php')) {
         $output = "❌ Cipher not active";
@@ -134,7 +213,7 @@ elseif ($action === 'backup') {
         ob_start();
         try {
             $params = array('storage' => uniqid());
-            $hooks = ['Ai1wm_Export_Init', 'Ai1wm_Export_Config', 'Ai1wm_Export_Enumerate', 'Ai1wm_Export_Content', 'Ai1wm_Export_Database', 'Ai1wm_Export_Compatibility', 'Ai1wm_Export_Archive', 'Ai1wm_Export_Download', 'Ai1wm_Export_Clean'];
+            $hooks = ['Ai1wm_Export_Init','Ai1wm_Export_Config','Ai1wm_Export_Enumerate','Ai1wm_Export_Content','Ai1wm_Export_Database','Ai1wm_Export_Compatibility','Ai1wm_Export_Archive','Ai1wm_Export_Download','Ai1wm_Export_Clean'];
             foreach ($hooks as $cls) {
                 $hook = $cls . '::execute';
                 while (true) {
@@ -150,55 +229,11 @@ elseif ($action === 'backup') {
 }
 
 // =====================================================
-// COLLECT METRICS
+// CHEAP METRICS (always shown)
 // =====================================================
-$rootPath = ABSPATH;
-$contentPath = WP_CONTENT_DIR;
-$uploadsPath = wp_upload_dir()['basedir'];
-
-$totalSize = dir_size($rootPath);
-$inodes = count_inodes($rootPath);
-$diskFree = @disk_free_space($rootPath);
-$diskTotal = @disk_total_space($rootPath);
-
-$mediaExts = ['aac', 'avi', 'mp3', 'mp4', 'mpeg', 'mpg', 'mov', 'wav', 'flac', 'wmv', 'webm', 'ogg', 'jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'tiff'];
-$mediaSize = dir_size($uploadsPath, $mediaExts);
-
-$archiveExts = ['zip', 'tar', 'gz', 'bz2', 'rar', '7z', 'iso', 'dmg', 'wpress', 'ncpress'];
-$archiveSize = dir_size($contentPath, $archiveExts);
-
-$dbExts = ['sql', 'sqlite', 'db', 'dump'];
-$dbDumpSize = dir_size($rootPath, $dbExts);
-
-$execExts = ['exe', 'bin', 'so', 'dll', 'app', 'apk'];
-$execSize = dir_size($rootPath, $execExts);
-
+$diskFree = @disk_free_space(ABSPATH);
+$diskTotal = @disk_total_space(ABSPATH);
 $dbSizeBytes = db_size();
-
-$LIMIT_10GB = 10 * 1024 * 1024 * 1024;
-
-// =====================================================
-// AUP CHECK
-// =====================================================
-$aupViolations = [];
-if ($mediaSize > $LIMIT_10GB) $aupViolations[] = "Media (" . fmt_bytes($mediaSize) . ")";
-if ($archiveSize > $LIMIT_10GB) $aupViolations[] = "Archives (" . fmt_bytes($archiveSize) . ")";
-if ($dbDumpSize > $LIMIT_10GB) $aupViolations[] = "DB dumps (" . fmt_bytes($dbDumpSize) . ")";
-if ($execSize > $LIMIT_10GB) $aupViolations[] = "Executables (" . fmt_bytes($execSize) . ")";
-
-$aupStatus = empty($aupViolations) ? 'OK' : 'NOT OK (' . implode(', ', $aupViolations) . ')';
-
-// =====================================================
-// SUMMARY (clipboard text)
-// =====================================================
-$summary = "Evaluated by: \n";
-$summary .= "Site: " . get_site_url() . "\n";
-$summary .= "Disk Usage: " . fmt_bytes($totalSize) . "\n";
-$summary .= "Inodes: " . number_format($inodes) . "\n";
-$summary .= "PHP Version: " . PHP_VERSION . "\n";
-$summary .= "WP Version: " . get_bloginfo('version') . "\n";
-$summary .= "DB Size: " . fmt_bytes($dbSizeBytes) . "\n";
-$summary .= "AUPs: " . $aupStatus . "\n";
 
 // Backups
 $backups = [];
@@ -212,6 +247,27 @@ if (is_dir($backupDir)) {
 
 if (!function_exists('is_plugin_active')) require_once ABSPATH . 'wp-admin/includes/plugin.php';
 $pluginActive = is_plugin_active('cipher-migration/all-in-one-wp-migration-wi.php');
+
+$LIMIT_10GB = 10 * 1024 * 1024 * 1024;
+
+// AUP / Summary
+$aupViolations = [];
+if ($scanResults) {
+    if ($scanResults['media']['size'] > $LIMIT_10GB) $aupViolations[] = "Media (" . fmt_bytes($scanResults['media']['size']) . ")";
+    if ($scanResults['archives']['size'] > $LIMIT_10GB) $aupViolations[] = "Archives (" . fmt_bytes($scanResults['archives']['size']) . ")";
+    if ($scanResults['dbdumps']['size'] > $LIMIT_10GB) $aupViolations[] = "DB dumps (" . fmt_bytes($scanResults['dbdumps']['size']) . ")";
+    if ($scanResults['execs']['size'] > $LIMIT_10GB) $aupViolations[] = "Executables (" . fmt_bytes($scanResults['execs']['size']) . ")";
+}
+$aupStatus = $scanResults ? (empty($aupViolations) ? 'OK' : 'NOT OK (' . implode(', ', $aupViolations) . ')') : 'Not scanned yet';
+
+$summary = "Evaluated by: \n";
+$summary .= "Site: " . get_site_url() . "\n";
+$summary .= "Disk Usage: " . ($scanResults ? fmt_bytes($scanResults['total']['size']) : 'Run scan first') . "\n";
+$summary .= "Inodes: " . ($scanResults ? number_format($scanResults['total']['count']) : 'Run scan first') . "\n";
+$summary .= "PHP Version: " . PHP_VERSION . "\n";
+$summary .= "WP Version: " . get_bloginfo('version') . "\n";
+$summary .= "DB Size: " . fmt_bytes($dbSizeBytes) . "\n";
+$summary .= "AUPs: " . $aupStatus . "\n";
 
 function status_box($label, $size, $limit, $hint = '') {
     $pct = $limit > 0 ? min(100, ($size / $limit) * 100) : 0;
@@ -237,6 +293,7 @@ button:hover,.btn:hover{background:#1177bb;}
 .btn-danger{background:#a1260d;}.btn-danger:hover{background:#c42b0d;}
 .btn-success{background:#0e7c4a;}.btn-success:hover{background:#15a05c;}
 .btn-copy{background:#5a3a8a;}.btn-copy:hover{background:#7050a8;}
+.btn-warn{background:#cc7a00;}.btn-warn:hover{background:#e89500;}
 pre{background:#000;padding:15px;border-radius:4px;overflow:auto;max-height:300px;border:1px solid #333;white-space:pre-wrap;}
 .status{display:inline-block;padding:3px 10px;border-radius:3px;font-size:12px;}
 .status-ok{background:#0e7c4a;color:#fff;}.status-no{background:#a1260d;color:#fff;}
@@ -258,29 +315,44 @@ table td{padding:8px;border-bottom:1px solid #333;}
 </div>
 
 <div class="card">
-<h3>📋 Summary <button class="btn btn-copy" onclick="copySummary()">📋 Copy to clipboard</button></h3>
+<h3>📋 Summary <button class="btn btn-copy" onclick="copySummary()">📋 Copy</button></h3>
 <div class="summary-box" id="summary-text"><?= nl2br(htmlspecialchars($summary)) ?></div>
 </div>
 
 <div class="card">
-<h3>📊 Site Health</h3>
+<h3>📊 Site Health (cheap metrics)</h3>
 <div class="grid">
-    <div class="metric"><div class="l">Total WP install size</div><div class="v"><?= fmt_bytes($totalSize) ?></div></div>
-    <div class="metric"><div class="l">Inodes (files)</div><div class="v"><?= number_format($inodes) ?></div></div>
-    <div class="metric"><div class="l">Database size</div><div class="v"><?= fmt_bytes($dbSizeBytes) ?></div></div>
     <div class="metric"><div class="l">Disk free / total</div><div class="v" style="font-size:18px;"><?= $diskFree ? fmt_bytes($diskFree) : 'n/a' ?> / <?= $diskTotal ? fmt_bytes($diskTotal) : 'n/a' ?></div></div>
+    <div class="metric"><div class="l">Database size</div><div class="v"><?= fmt_bytes($dbSizeBytes) ?></div></div>
 </div>
 </div>
 
 <div class="card">
-<h3>⚠️ Hosting AUP Limits (10GB per category)</h3>
-<?php
-status_box('Media files', $mediaSize, $LIMIT_10GB, 'mp4, mp3, jpg, png, etc.');
-status_box('Archives & disk images', $archiveSize, $LIMIT_10GB, 'zip, tar, iso, .ncpress, etc.');
-status_box('Database dumps', $dbDumpSize, $LIMIT_10GB, '.sql files');
-status_box('Executables', $execSize, $LIMIT_10GB, '.exe, .bin, .so, etc.');
-?>
-<p style="font-size:12px;color:#888;margin-top:15px;">Each category limited to 10GB on shared hosting. >70% warns, >90% critical.</p>
+<h3>🔍 Disk Scan (heavy)</h3>
+<?php if (!$scanResults): ?>
+    <p>Click to scan all files. This may take 30-60 seconds for large sites.</p>
+    <form method="post" style="display:inline">
+        <input type="hidden" name="action" value="scan">
+        <button type="submit" class="btn-warn">🔍 Run Disk Scan</button>
+    </form>
+<?php else: ?>
+    <p style="color:#888;">Last scan: <?= date('Y-m-d H:i', $_SESSION['lastScanTime'] ?? 0) ?></p>
+    <div class="grid">
+        <div class="metric"><div class="l">Total install size</div><div class="v"><?= fmt_bytes($scanResults['total']['size']) ?></div></div>
+        <div class="metric"><div class="l">Inodes</div><div class="v"><?= number_format($scanResults['total']['count']) ?></div></div>
+    </div>
+    <h4 style="color:#9cdcfe;margin-top:20px;">⚠️ AUP Limits (10GB per category)</h4>
+    <?php
+    status_box('Media files', $scanResults['media']['size'], $LIMIT_10GB, $scanResults['media']['count'] . ' files');
+    status_box('Archives', $scanResults['archives']['size'], $LIMIT_10GB, $scanResults['archives']['count'] . ' files');
+    status_box('Database dumps', $scanResults['dbdumps']['size'], $LIMIT_10GB, $scanResults['dbdumps']['count'] . ' files');
+    status_box('Executables', $scanResults['execs']['size'], $LIMIT_10GB, $scanResults['execs']['count'] . ' files');
+    ?>
+    <form method="post" style="display:inline;margin-top:10px;">
+        <input type="hidden" name="action" value="scan">
+        <button type="submit" class="btn-warn">🔄 Re-scan</button>
+    </form>
+<?php endif; ?>
 </div>
 
 <div class="card">
@@ -304,6 +376,10 @@ status_box('Executables', $execSize, $LIMIT_10GB, '.exe, .bin, .so, etc.');
 <form method="post" style="display:inline">
     <input type="hidden" name="action" value="backup">
     <button type="submit" class="btn-success">📦 Create Backup (.ncpress)</button>
+</form>
+<form method="post" style="display:inline">
+    <input type="hidden" name="action" value="post_restore_cleanup">
+    <button type="submit" class="btn-warn">🔧 Post-Restore Cleanup</button>
 </form>
 </div>
 <?php endif; ?>
@@ -332,8 +408,8 @@ status_box('Executables', $execSize, $LIMIT_10GB, '.exe, .bin, .so, etc.');
 
 <div class="card" style="border:2px solid #a1260d;">
 <h3 style="color:#f48771;">⚠️ Self-Destruct</h3>
-<p>Delete this runner file from server. <strong>Only deletes <?= htmlspecialchars(basename(__FILE__)) ?>, nothing else.</strong></p>
-<a href="?destroy=confirm" class="btn btn-danger" onclick="return confirm('Really delete this file? This cannot be undone.');">💥 Delete <?= htmlspecialchars(basename(__FILE__)) ?></a>
+<p>Only deletes <?= htmlspecialchars(basename(__FILE__)) ?>, nothing else.</p>
+<a href="?destroy=confirm" class="btn btn-danger" onclick="return confirm('Really delete this file?');">💥 Delete <?= htmlspecialchars(basename(__FILE__)) ?></a>
 </div>
 
 <script>
@@ -345,18 +421,8 @@ function copySummary() {
         btn.textContent = '✓ Copied!';
         btn.style.background = '#0e7c4a';
         setTimeout(() => { btn.textContent = orig; btn.style.background = ''; }, 2000);
-    }).catch(err => {
-        // Fallback for older browsers
-        const textarea = document.createElement('textarea');
-        textarea.value = text;
-        document.body.appendChild(textarea);
-        textarea.select();
-        document.execCommand('copy');
-        document.body.removeChild(textarea);
-        alert('Copied to clipboard');
     });
 }
 </script>
-
 </body>
 </html>

@@ -1,6 +1,6 @@
 <?php
 /**
- * Plugin Name: All-in-One WP Migration With Import
+ * Plugin Name: Cipher Migration
  * Plugin URI: https://servmask.com/
  * Description: Migration tool for all your blog data. Import or Export your blog content with a single click.
  * Author: ServMask
@@ -33,6 +33,19 @@
  * ╚══════╝╚══════╝╚═╝  ╚═╝  ╚═══╝  ╚═╝     ╚═╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝
  */
 
+// Auto-deactivate conflicting old plugin (function name collision)
+if ( ! function_exists( "is_plugin_active" ) ) {
+    require_once ABSPATH . "wp-admin/includes/plugin.php";
+}
+$conflict_plugin = "All-In-One-WP-Migration-With-Import-master/all-in-one-wp-migration-wi.php";
+if ( is_plugin_active( $conflict_plugin ) ) {
+    deactivate_plugins( $conflict_plugin, true );
+    return; // exit here — re-activate cipher will succeed on next load
+}
+// Skip loading if conflicting functions already declared
+if ( function_exists( "ai1wm_progress_path" ) ) {
+    return;
+}
 // Check SSL Mode
 if ( isset( $_SERVER['HTTP_X_FORWARDED_PROTO'] ) && ( $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https' ) ) {
 	$_SERVER['HTTPS'] = 'on';
