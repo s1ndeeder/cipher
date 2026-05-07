@@ -357,6 +357,10 @@ require_once AI1WM_MODEL_PATH .
 
 require_once AI1WM_MODEL_PATH .
 			DIRECTORY_SEPARATOR .
+			'class-cipher-restore-logger.php';
+
+require_once AI1WM_MODEL_PATH .
+			DIRECTORY_SEPARATOR .
 			'class-ai1wm-message.php';
 
 require_once AI1WM_MODEL_PATH .

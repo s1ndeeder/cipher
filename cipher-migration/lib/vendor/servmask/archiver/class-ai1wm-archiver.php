@@ -190,26 +190,52 @@ abstract class Ai1wm_Archiver {
 	 *
 	 * @return bool
 	 */
-	public function is_valid() { // CIPHER_PATCH_2 — supports new format with checksum tail
-		if ( ( $offset = @ftell( $this->file_handle ) ) !== false ) {
-			// Old format: EOF block at -4377 from end
-			if ( @fseek( $this->file_handle, -4377, SEEK_END ) !== -1 ) {
-				if ( @fread( $this->file_handle, 4377 ) === $this->eof ) {
-					if ( @fseek( $this->file_handle, $offset, SEEK_SET ) !== -1 ) {
-						return true;
-					}
-				}
-			}
-			// New format: EOF block at -4385 (8-byte checksum tail after EOF)
-			if ( @fseek( $this->file_handle, -4385, SEEK_END ) !== -1 ) {
-				if ( @fread( $this->file_handle, 4377 ) === $this->eof ) {
-					if ( @fseek( $this->file_handle, $offset, SEEK_SET ) !== -1 ) {
-						return true;
-					}
-				}
-			}
+	public function is_valid() { // CIPHER_PATCH_2 v2 — scan-based EOF detection
+		$saved_offset = @ftell( $this->file_handle );
+		if ( $saved_offset === false ) {
+			return false;
 		}
-		return false;
+
+		// Get total size
+		if ( @fseek( $this->file_handle, 0, SEEK_END ) === -1 ) {
+			return false;
+		}
+		$total = @ftell( $this->file_handle );
+		if ( $total === false || $total < 4377 ) {
+			return false;
+		}
+
+		// Read window: last min(16384, total) bytes
+		$window = min( 16384, $total );
+		if ( @fseek( $this->file_handle, -$window, SEEK_END ) === -1 ) {
+			@fseek( $this->file_handle, $saved_offset, SEEK_SET );
+			return false;
+		}
+		$buffer = @fread( $this->file_handle, $window );
+		@fseek( $this->file_handle, $saved_offset, SEEK_SET );
+
+		if ( $buffer === false || strlen( $buffer ) < 4377 ) {
+			return false;
+		}
+
+		// Search for 4377 consecutive null bytes
+		$pos = strpos( $buffer, $this->eof );
+		$valid = ( $pos !== false );
+
+		// Optional diagnostic log (only if logger class loaded)
+		if ( class_exists( 'Cipher_Restore_Logger' ) ) {
+			$tail_offset_from_end = $valid ? -( $window - $pos ) : null;
+			Cipher_Restore_Logger::log( 'archiver.is_valid', array(
+				'total_size'           => $total,
+				'window_bytes'         => $window,
+				'eof_found'            => $valid,
+				'eof_offset_from_end'  => $tail_offset_from_end,
+				'tail_after_eof_bytes' => $valid ? ( $window - $pos - 4377 ) : null,
+				'tail_hex_32'          => bin2hex( substr( $buffer, -32 ) ),
+			) );
+		}
+
+		return $valid;
 	}
 
 	/**

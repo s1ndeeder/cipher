@@ -247,6 +247,10 @@ if ( class_exists( 'WP_CLI_Command' ) ) {
 				exit;
 			}
 
+			Cipher_Restore_Logger::init( 'restore' );
+			Cipher_Restore_Logger::preflight( ai1wm_backup_path( array( 'archive' => $args[0] ) ) );
+			WP_CLI::log( 'Diagnostic log: ' . Cipher_Restore_Logger::get_log_file() );
+
 			WP_CLI::log( 'Restore in progress...' );
 
 			try {
@@ -258,6 +262,28 @@ if ( class_exists( 'WP_CLI_Command' ) ) {
 				remove_filter( 'ai1wm_import', 'Ai1wm_Import_Upload::execute', 5 );
 				remove_filter( 'ai1wm_import', 'Ai1wm_Import_Confirm::execute', 100 );
 				remove_filter( 'ai1wm_import', 'Ai1wm_Import_Clean::execute', 400 );
+			// Stage instrumentation — log before/after each pipeline stage
+			$stages = array(
+				10  => 'Compatibility',
+				50  => 'Validate',
+				150 => 'Blogs',
+				200 => 'Enumerate',
+				250 => 'Content',
+				270 => 'Mu_Plugins',
+				300 => 'Database',
+				350 => 'Done',
+			);
+			foreach ( $stages as $priority => $name ) {
+				add_filter( 'ai1wm_import', function( $p ) use ( $name ) {
+					Cipher_Restore_Logger::stage_before( $name );
+					return $p;
+				}, $priority - 1 );
+				add_filter( 'ai1wm_import', function( $p ) use ( $name ) {
+					Cipher_Restore_Logger::stage_after( $name, $p );
+					return $p;
+				}, $priority + 1 );
+			}
+
 
 				// Run filters
 				$params = apply_filters( 'ai1wm_import', $params );
@@ -268,6 +294,8 @@ if ( class_exists( 'WP_CLI_Command' ) ) {
 
 			// Clean storage folder
 			Ai1wm_Directory::delete( ai1wm_storage_path( $params ) );
+
+			Cipher_Restore_Logger::log( 'restore.completed', array( 'params_keys' => is_array($params) ? array_keys($params) : 'not_array' ) );
 
 			WP_CLI::log( 'Restore complete.' );
 		}
